@@ -1,7 +1,7 @@
 const mineflayer = require('mineflayer');
-const Movements = require('mineflayer-pathfinder').Movements;
-const pathfinder = require('mineflayer-pathfinder').pathfinder;
-const { GoalBlock } = require('mineflayer-pathfinder').goals;
+const { pathfinder, Movements, goals: { GoalBlock, GoalNear } } = require('mineflayer-pathfinder');
+const collectBlock = require('mineflayer-collectblock');
+const pvp = require('mineflayer-pvp').plugin;
 
 const config = require('./settings.json');
 const express = require('express');
@@ -9,173 +9,221 @@ const express = require('express');
 const app = express();
 
 app.get('/', (req, res) => {
-  res.send('Bot has arrived');
+  res.send('Bot has arrived 🤖');
 });
 
 app.listen(8000, () => {
-  console.log('Server started');
+  console.log('🌐 Web server started on http://localhost:8000');
 });
 
+// =============================
+// 🎯 MODUL MODULAR
+// =============================
+
+function startChatModule(bot, config) {
+  if (!config.utils['chat-messages'].enabled) return;
+
+  console.log('[INFO] Chat module started');
+  const messages = config.utils['chat-messages']['messages'];
+  if (config.utils['chat-messages'].repeat) {
+    const delay = config.utils['chat-messages']['repeat-delay'] * 1000;
+    let i = 0;
+    setInterval(() => {
+      bot.chat(messages[i]);
+      i = (i + 1) % messages.length;
+    }, delay);
+  } else {
+    messages.forEach(msg => bot.chat(msg));
+  }
+}
+
+function startAntiAFK(bot, config) {
+  if (!config.utils['anti-afk'].enabled) return;
+
+  bot.setControlState('jump', true);
+  if (config.utils['anti-afk'].sneak) bot.setControlState('sneak', true);
+
+  setInterval(() => {
+    bot.setControlState('forward', true);
+    setTimeout(() => {
+      bot.setControlState('forward', false);
+      bot.setControlState('back', true);
+      setTimeout(() => bot.setControlState('back', false), 1000);
+    }, 1000);
+  }, 60000);
+}
+
+function startAutoEat(bot, mcData, config) {
+  if (!config.utils['auto-eat']?.enabled) return;
+
+  console.log('[INFO] Auto-eat module started');
+  setInterval(() => {
+    if (bot.food >= 20 || bot.isEating) return;
+
+    const food = bot.inventory.items().find(item =>
+      mcData.foods[item.type] && item.count > 0
+    );
+
+    if (food) {
+      bot.equip(food, 'hand', () => {
+        bot.consume(() => {
+          console.log(`[AutoEat] Ate ${food.name}. Food: ${bot.food}/20`);
+        });
+      });
+    }
+  }, 3000);
+}
+
+const HOSTILE_MOBS = ['zombie', 'skeleton', 'creeper', 'spider', 'enderman', 'witch', 'slime', 'phantom'];
+
+function startAvoidMobs(bot, config) {
+  if (!config.utils['avoid-mobs']?.enabled) return;
+
+  console.log('[INFO] Avoid mobs module started');
+  bot.on('entitySpawn', (entity) => {
+    if (entity.type === 'mob' && HOSTILE_MOBS.includes(entity.mobType)) {
+      const distance = bot.entity.position.distanceTo(entity.position);
+      if (distance < 5) {
+        const dx = bot.entity.position.x - entity.position.x;
+        const dz = bot.entity.position.z - entity.position.z;
+        const runPos = bot.entity.position.offset(dx * 3, 0, dz * 3);
+        bot.pathfinder.setGoal(new GoalNear(runPos.x, runPos.y, runPos.z, 1));
+        console.log(`[Avoid] Running from ${entity.mobType} at distance ${distance.toFixed(1)}`);
+      }
+    }
+  });
+}
+
+function startCommandHandler(bot, mcData) {
+  bot.on('chat', (username, message) => {
+    if (!message.startsWith('/bot ')) return;
+
+    const args = message.slice(5).split(' ');
+    const command = args[0];
+
+    if (command === 'go' && args.length === 4) {
+      const [x, y, z] = args.slice(1).map(Number);
+      if (isNaN(x) || isNaN(y) || isNaN(z)) {
+        bot.chat('❌ Invalid coordinates. Usage: /bot go <x> <y> <z>');
+        return;
+      }
+      bot.pathfinder.setGoal(new GoalNear(x, y, z, 1));
+      bot.chat(`✅ Going to ${x} ${y} ${z}`);
+    } 
+    else if (command === 'follow' && args.length === 2) {
+      const targetName = args[1];
+      const target = bot.players[targetName]?.entity;
+      if (!target) {
+        bot.chat(`❌ Player "${targetName}" not found.`);
+        return;
+      }
+      // Simpan interval agar bisa dihentikan
+      if (bot._followInterval) clearInterval(bot._followInterval);
+      bot._followInterval = setInterval(() => {
+        const tgt = bot.players[targetName]?.entity;
+        if (tgt) {
+          bot.pathfinder.setGoal(new GoalNear(tgt.position.x, tgt.position.y, tgt.position.z, 2));
+        } else {
+          clearInterval(bot._followInterval);
+          bot.chat(`⏹️ Stopped following ${targetName} (player left).`);
+        }
+      }, 1000);
+      bot.chat(`✅ Now following ${targetName}`);
+    } 
+    else if (command === 'stop') {
+      if (bot._followInterval) clearInterval(bot._followInterval);
+      bot.pathfinder.setGoal(null);
+      bot.setControlState('forward', false);
+      bot.setControlState('back', false);
+      bot.chat('⏹️ Stopped all movement.');
+    } 
+    else if (command === 'eat') {
+      if (bot.food >= 20) {
+        bot.chat('✅ Already full!');
+        return;
+      }
+      const food = bot.inventory.items().find(item => mcData.foods[item.type]);
+      if (food) {
+        bot.equip(food, 'hand', () => {
+          bot.consume(() => {
+            bot.chat(`🍖 Ate ${food.name}! Hunger: ${bot.food}/20`);
+          });
+        });
+      } else {
+        bot.chat('❌ No food found in inventory!');
+      }
+    }
+    else {
+      bot.chat('❓ Unknown command. Try: /bot go x y z | /bot follow <player> | /bot stop | /bot eat');
+    }
+  });
+}
+
+// =============================
+// 🤖 CREATE BOT FUNCTION
+// =============================
+
 function createBot() {
-   const bot = mineflayer.createBot({
-      username: config['bot-account']['username'],
-      password: config['bot-account']['password'],
-      auth: config['bot-account']['type'],
-      host: config.server.ip,
-      port: config.server.port,
-      version: config.server.version,
-   });
+  const bot = mineflayer.createBot({
+    username: config['bot-account']['username'],
+    password: config['bot-account']['password'],
+    auth: config['bot-account']['type'],
+    host: config.server.ip,
+    port: config.server.port,
+    version: config.server.version,
+  });
 
-   bot.loadPlugin(pathfinder);
-   const mcData = require('minecraft-data')(bot.version);
-   const defaultMove = new Movements(bot, mcData);
-   
-   let pendingPromise = Promise.resolve();
+  // Load plugins — HAPUS navigate karena bentrok dengan pathfinder
+  bot.loadPlugin(pathfinder);
+  bot.loadPlugin(collectBlock);
+  bot.loadPlugin(pvp); // jika nanti mau tambah fitur pvp
 
-   function sendRegister(password) {
-      return new Promise((resolve, reject) => {
-         bot.chat(`/register ${password} ${password}`);
-         console.log(`[Auth] Sent /register command.`);
+  const mcData = require('minecraft-data')(bot.version);
+  const defaultMove = new Movements(bot, mcData);
+  bot.pathfinder.setMovements(defaultMove);
 
-         bot.once('chat', (username, message) => {
-            console.log(`[ChatLog] <${username}> ${message}`); // Log all chat messages
+  // ======================
+  // 🎯 Spawn Event — Main Logic
+  // ======================
+  bot.once('spawn', () => {
+    console.log('\x1b[33m[AfkBot] Bot joined the server ✅\x1b[0m');
 
-            // Check for various possible responses
-            if (message.includes('successfully registered')) {
-               console.log('[INFO] Registration confirmed.');
-               resolve();
-            } else if (message.includes('already registered')) {
-               console.log('[INFO] Bot was already registered.');
-               resolve(); // Resolve if already registered
-            } else if (message.includes('Invalid command')) {
-               reject(`Registration failed: Invalid command. Message: "${message}"`);
-            } else {
-               reject(`Registration failed: unexpected message "${message}".`);
-            }
-         });
-      });
-   }
+    // Jalankan semua modul
+    startChatModule(bot, config);
+    startAntiAFK(bot, config);
+    startAutoEat(bot, mcData, config);
+    startAvoidMobs(bot, config);
+    startCommandHandler(bot, mcData);
 
-   function sendLogin(password) {
-      return new Promise((resolve, reject) => {
-         bot.chat(`/login ${password}`);
-         console.log(`[Auth] Sent /login command.`);
+    // Jika nanti mau aktifkan follow player via config, bisa ditambahkan:
+    // if (config.utils['follow-player']?.enabled) startFollowPlayer(bot, config);
+  });
 
-         bot.once('chat', (username, message) => {
-            console.log(`[ChatLog] <${username}> ${message}`); // Log all chat messages
+  // 🎯 Saat sampai tujuan
+  bot.on('goal_reached', () => {
+    console.log(`\x1b[32m[AfkBot] Reached goal at ${bot.entity.position}\x1b[0m`);
+  });
 
-            if (message.includes('successfully logged in')) {
-               console.log('[INFO] Login successful.');
-               resolve();
-            } else if (message.includes('Invalid password')) {
-               reject(`Login failed: Invalid password. Message: "${message}"`);
-            } else if (message.includes('not registered')) {
-               reject(`Login failed: Not registered. Message: "${message}"`);
-            } else {
-               reject(`Login failed: unexpected message "${message}".`);
-            }
-         });
-      });
-   }
+  // ☠️ Saat mati — AUTO RESPOND
+  bot.on('death', () => {
+    console.log(`\x1b[33m[AfkBot] Died at ${bot.entity.position} — Respawning...\x1b[0m`);
+    setTimeout(() => {
+      bot.chat('/spawn');
+      console.log('[AutoRespawn] Sent /spawn command');
+    }, 2000);
+  });
 
-   bot.once('spawn', () => {
-      console.log('\x1b[33m[AfkBot] Bot joined the server', '\x1b[0m');
+  // 🔁 Auto Reconnect
+  if (config.utils['auto-reconnect']) {
+    bot.on('end', () => {
+      console.log('[INFO] Disconnected. Reconnecting in 5s...');
+      setTimeout(() => createBot(), config.utils['auto-recconect-delay'] || 5000);
+    });
+  }
 
-      if (config.utils['auto-auth'].enabled) {
-         console.log('[INFO] Started auto-auth module');
-
-         const password = config.utils['auto-auth'].password;
-
-         pendingPromise = pendingPromise
-            .then(() => sendRegister(password))
-            .then(() => sendLogin(password))
-            .catch(error => console.error('[ERROR]', error));
-      }
-
-      if (config.utils['chat-messages'].enabled) {
-         console.log('[INFO] Started chat-messages module');
-         const messages = config.utils['chat-messages']['messages'];
-
-         if (config.utils['chat-messages'].repeat) {
-            const delay = config.utils['chat-messages']['repeat-delay'];
-            let i = 0;
-
-            let msg_timer = setInterval(() => {
-               bot.chat(`${messages[i]}`);
-
-               if (i + 1 === messages.length) {
-                  i = 0;
-               } else {
-                  i++;
-               }
-            }, delay * 1000);
-         } else {
-            messages.forEach((msg) => {
-               bot.chat(msg);
-            });
-         }
-      }
-
-      const pos = config.position;
-
-      if (config.position.enabled) {
-         console.log(
-            `\x1b[32m[Afk Bot] Starting to move to target location (${pos.x}, ${pos.y}, ${pos.z})\x1b[0m`
-         );
-         bot.pathfinder.setMovements(defaultMove);
-         bot.pathfinder.setGoal(new GoalBlock(pos.x, pos.y, pos.z));
-      }
-
-      if (config.utils['anti-afk'].enabled) {
-         bot.setControlState('jump', true);
-         if (config.utils['anti-afk'].sneak) {
-            bot.setControlState('sneak', true);
-         }
-
-         // 🔹 Tambahin gerak maju-mundur tiap 1 menit
-         setInterval(() => {
-            bot.setControlState('forward', true)
-            setTimeout(() => {
-               bot.setControlState('forward', false)
-               bot.setControlState('back', true)
-               setTimeout(() => bot.setControlState('back', false), 1000)
-            }, 1000)
-         }, 60000)
-      }
-   });
-
-   bot.on('goal_reached', () => {
-      console.log(
-         `\x1b[32m[AfkBot] Bot arrived at the target location. ${bot.entity.position}\x1b[0m`
-      );
-   });
-
-   bot.on('death', () => {
-      console.log(
-         `\x1b[33m[AfkBot] Bot has died and was respawned at ${bot.entity.position}`,
-         '\x1b[0m'
-      );
-   });
-
-   if (config.utils['auto-reconnect']) {
-      bot.on('end', () => {
-         setTimeout(() => {
-            createBot();
-         }, config.utils['auto-recconect-delay']);
-      });
-   }
-
-   bot.on('kicked', (reason) =>
-      console.log(
-         '\x1b[33m',
-         `[AfkBot] Bot was kicked from the server. Reason: \n${reason}`,
-         '\x1b[0m'
-      )
-   );
-
-   bot.on('error', (err) =>
-      console.log(`\x1b[31m[ERROR] ${err.message}`, '\x1b[0m')
-   );
+  // ❌ Error handling
+  bot.on('kicked', (reason) => console.log('\x1b[33m[KICKED]', reason, '\x1b[0m'));
+  bot.on('error', (err) => console.log('\x1b[31m[ERROR]', err.message, '\x1b[0m'));
 }
 
 createBot();
