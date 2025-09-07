@@ -1,16 +1,16 @@
 {
   "bot-account": {
-    "username": "SERVER", 
+    "username": "SERVER",
     "password": "",
     "type": "offline"
   },
 
   "server": {
-    "ip": "BetterO.aternos.me", 
-    "port": 37799,   
-    "version": "1.12.1"   
+    "ip": "BetterO.aternos.me",
+    "port": 37799,
+    "version": "1.12.1"
   },
-  
+
   "position": {
     "enabled": false,
     "x": 0,
@@ -33,7 +33,6 @@
       "enabled": true,
       "repeat": true,
       "repeat-delay": 60,
-
       "messages": [
         "aku suka mandi",
         "Halo Player",
@@ -41,8 +40,21 @@
       ]
     },
 
+    "auto-eat": {
+      "enabled": true
+    },
+
+    "avoid-mobs": {
+      "enabled": true
+    },
+
+    "follow-player": {
+      "enabled": false,
+      "target": "PlayerName"
+    },
+
     "chat-log": true,
     "auto-reconnect": true,
-    "auto-recconect-delay": 5000
+    "auto-reconnect-delay": 5000
   }
 }
